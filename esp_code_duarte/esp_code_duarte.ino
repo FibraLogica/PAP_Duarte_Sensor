@@ -4,30 +4,23 @@
 #include <ESP8266WiFi.h>
 #include <ArduinoJson.h>
 
-#if (defined(__AVR__) || defined(ESP8266)) && !defined(__AVR_ATmega2560__)
-SoftwareSerial mySerial(12, 15);
-#else
-#define mySerial Serial1
-#endif
+SoftwareSerial mySerial(12, 15); // RX, TX
 
-#define pinGreenLed 2
-#define pinRedLed 4
-#define pinYellowLed 14
-#define pinButton 16
-
-int lastButtonState = LOW; // O último estado do botão
+// Definição de constantes
+const int PIN_GREEN_LED = 2;
+const int PIN_RED_LED = 4;
+const int PIN_YELLOW_LED = 14;
+const int PIN_BUTTON = 16;
+const char* SSID = "ValeFloresResidence";
+const char* WIFI_PASSWORD = "9FA705F8F2";
+const char* SERVER_HOST = "http://192.168.1.72:5000";
+int id = 0;
 
 IPAddress local_IP(192, 168, 1, 161);
 IPAddress gateway(192, 168, 1, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-const char* ssid = "ValeFloresResidence";
-const char* password = "9FA705F8F2";
-const char* host = "http://192.168.1.70:5000";
-
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
-
-uint8_t id;
 
 void setup()
 {
@@ -35,11 +28,10 @@ void setup()
   while (!Serial);
   delay(100);
 
-  pinMode(pinYellowLed, OUTPUT);
-  pinMode(pinRedLed, OUTPUT);
-  pinMode(pinGreenLed, OUTPUT);
-  pinMode(pinButton, INPUT);
-  
+  pinMode(PIN_YELLOW_LED, OUTPUT);
+  pinMode(PIN_RED_LED, OUTPUT);
+  pinMode(PIN_GREEN_LED, OUTPUT);
+  pinMode(PIN_BUTTON, INPUT_PULLUP);
 
   // Configurar a taxa de dados para a porta serial do sensor
   finger.begin(57600);
@@ -54,7 +46,7 @@ void setup()
   // Conectar ao WiFi
   WiFi.mode(WIFI_STA);
   WiFi.config(local_IP, gateway, subnet);
-  WiFi.begin(ssid, password);
+  WiFi.begin(SSID, WIFI_PASSWORD);
   Serial.println("A conectar ao WiFi...");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
@@ -65,39 +57,43 @@ void setup()
   Serial.println(WiFi.localIP());
 }
 
-uint8_t readnumber(void) {
-  uint8_t num = 0;
-
-  while (num == 0) {
-    while (!Serial.available());
-    num = Serial.parseInt();
-  }
-  return num;
-}
 
 void loop() {
-  // Lê o estado atual do botão
-  int buttonState = digitalRead(pinButton);
-  // Se o botão foi pressionado
-  if (buttonState == LOW) {
-    // Registra uma impressão digital com o ID atual
-    Serial.print("Registando ID #");
-    Serial.println(id);
-    while (!getFingerprintEnroll());
-    // Incrementa o ID para o próximo registro
-    id++;
-  } else {
-    // Verifica a impressão digital
-    int result = getFingerprintID();
-    if (result != -1) {
-      // Se a impressão digital foi reconhecida, "abre a porta" (acende o LED)
-      digitalWrite(pinYellowLed, HIGH);
-      delay(5000); // Mantém a "porta" aberta por 5 segundos
-      digitalWrite(pinYellowLed, LOW);
-    }
+  int result = getFingerprintIDez();
+  switch (result) {
+    case FINGERPRINT_OK:
+      Serial.println("Impressão digital reconhecida");
+      digitalWrite(PIN_GREEN_LED, HIGH);   // acende o LED verde
+      delay(2000);                         // espera 2 segundos
+      digitalWrite(PIN_GREEN_LED, LOW);    // apaga o LED verde
+      break;
+    case FINGERPRINT_NOFINGER:
+      Serial.println("Nenhuma impressão digital detectada");
+      break;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      Serial.println("Erro de comunicação");
+      break;
+    case FINGERPRINT_IMAGEFAIL:
+      Serial.println("Falha na leitura da impressão digital");
+      break;
+    case FINGERPRINT_NOTFOUND:
+      Serial.println("Impressão digital não reconhecida");
+      digitalWrite(PIN_RED_LED, HIGH);     // acende o LED vermelho
+      delay(2000);                         // espera 2 segundos
+      digitalWrite(PIN_RED_LED, LOW);      // apaga o LED vermelho
+      break;
+    default:
+      Serial.println("Erro desconhecido");
+      break;
   }
+  if (digitalRead(PIN_BUTTON) == LOW) {
+    getFingerprintEnroll();
+  }
+  delay(200);            // pequena pausa para não sobrecarregar o sensor
 }
 
+
+//Esta função recebe um ID de impressão digital, cria um documento JSON com ele, e envia uma requisição POST para o servidor. A resposta do servidor é lida e impressa no monitor serial.
 void createUser(int id) {
   HTTPClient http;
   WiFiClient wifiClient;
@@ -110,12 +106,11 @@ void createUser(int id) {
   String requestBody;
   serializeJson(doc, requestBody);
 
-  http.begin(wifiClient, String(host) + "/create_user"); // Especifica a URL para a API do teu servidor
+  http.begin(wifiClient, String(SERVER_HOST) + "/create_user"); // Especifica a URL para a API do teu servidor
   http.addHeader("Content-Type", "application/json");
   int httpResponseCode = http.POST(requestBody);
   delay(100); // Aguarda um pouco para dar tempo de ler a resposta
   http.end();
-
 
   if (httpResponseCode == 201) {
     String response = http.getString();
@@ -134,70 +129,116 @@ void createUser(int id) {
   http.end();
 }
 
-int getFingerprintID() {
-  uint8_t p = finger.getImage();
-  if (p != FINGERPRINT_OK)  return -1;
+//Esta função recebe um ID de impressão digital, verifica se ele existe no sensor e, em seguida, envia uma requisição POST para o servidor para verificar se ele existe na base de dados. A resposta do servidor é lida e impressa no monitor serial.
+bool verifyFingerprint(int fingerprintID) {
+  // Verifica se a impressão digital existe no sensor
+  if (!finger.fingerFastSearch()) {
+    Serial.println("Impressão digital não encontrada no sensor");
+    return false;
+  }
 
-  p = finger.image2Tz();
-  if (p != FINGERPRINT_OK)  return -1;
+  // Verifica se a impressão digital existe na base de dados
+  HTTPClient http;
+  WiFiClient wifiClient;
 
-  p = finger.fingerFastSearch();
-  if (p != FINGERPRINT_OK)  return -1;
+  // Cria um documento JSON
+  StaticJsonDocument<200> doc;
+  doc["user_id"] = fingerprintID;
 
-  // found a match!
-  Serial.print("Found ID #"); Serial.print(finger.fingerID); 
-  Serial.print(" with confidence of "); Serial.println(finger.confidence); 
+  // Serializa o documento JSON
+  String requestBody;
+  serializeJson(doc, requestBody);
 
-  return finger.fingerID;
+  http.begin(wifiClient, String(SERVER_HOST) + "/unlock"); // Especifica a URL para a API do teu servidor
+  http.addHeader("Content-Type", "application/json");
+  int httpResponseCode = http.POST(requestBody);
+  delay(100); // Aguarda um pouco para dar tempo de ler a resposta
+
+  if (httpResponseCode == 200) {
+    String response = http.getString();
+    Serial.println("Resposta do servidor:");
+    Serial.println(response);
+    Serial.println("Porta desbloqueada! Bem-vindo");
+    return true;
+  } else if (httpResponseCode == 404) {
+    Serial.println("Utilizador não encontrado");
+  } else {
+    Serial.println("Ocorreu um erro ao verificar a impressão digital");
+  }
+
+  http.end();
+  return false;
 }
 
-uint8_t getFingerprintEnroll()
-{
+//A função getFingerprintIDez() será responsável por ler uma impressão digital do sensor e verificar se ela está registrada
+int getFingerprintIDez() {
+  uint8_t p = finger.getImage();
+  if (p != FINGERPRINT_OK)  return p;
+  
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK)  return p;
+  
+  p = finger.fingerFastSearch();
+  if (p != FINGERPRINT_OK)  return p;
+  
+  // Se a impressão digital foi encontrada e reconhecida, verifica se ela está registrada no servidor
+  if (verifyFingerprint(finger.fingerID)) {
+    return FINGERPRINT_OK;
+  } else {
+    return FINGERPRINT_NOTFOUND;
+  }
+}
+
+//Esta função é responsável por registrar uma nova impressão digital no sensor
+uint8_t getFingerprintEnroll() {
   int p = -1;
-  Serial.print("Aguardando um dedo válido para o registo com o ID #"); Serial.println(id);
+  Serial.print("Waiting for valid finger to enroll as #"); Serial.println(id);
   while (p != FINGERPRINT_OK) {
     p = finger.getImage();
     switch (p) {
-      case FINGERPRINT_OK:
-        Serial.println("Imagem capturada");
-        break;
-      case FINGERPRINT_NOFINGER:
-        break;
-      case FINGERPRINT_PACKETRECIEVEERR:
-        Serial.println("Erro de comunicação");
-        break;
-      case FINGERPRINT_IMAGEFAIL:
-        Serial.println("Erro na captura da imagem");
-        break;
-      default:
-        Serial.println("Erro desconhecido");
-        break;
+    case FINGERPRINT_OK:
+      Serial.println("Image taken");
+      break;
+    case FINGERPRINT_NOFINGER:
+      Serial.println(".");
+      break;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      break;
+    case FINGERPRINT_IMAGEFAIL:
+      Serial.println("Imaging error");
+      break;
+    default:
+      Serial.println("Unknown error");
+      break;
     }
   }
+
+  // OK success!
 
   p = finger.image2Tz(1);
   switch (p) {
     case FINGERPRINT_OK:
-      Serial.println("Imagem convertida");
+      Serial.println("Image converted");
       break;
     case FINGERPRINT_IMAGEMESS:
-      Serial.println("Imagem muito confusa");
+      Serial.println("Image too messy");
       return p;
     case FINGERPRINT_PACKETRECIEVEERR:
-      Serial.println("Erro de comunicação");
+      Serial.println("Communication error");
       return p;
     case FINGERPRINT_FEATUREFAIL:
-      Serial.println("Não foi possível encontrar características da impressão digital");
+      Serial.println("Could not find fingerprint features");
       return p;
     case FINGERPRINT_INVALIDIMAGE:
-      Serial.println("Não foi possível encontrar características da impressão digital");
+      Serial.println("Could not find fingerprint features");
       return p;
     default:
-      Serial.println("Erro desconhecido");
+      Serial.println("Unknown error");
       return p;
   }
 
-  Serial.println("Remova o dedo");
+  Serial.println("Remove finger");
   delay(2000);
   p = 0;
   while (p != FINGERPRINT_NOFINGER) {
@@ -205,82 +246,88 @@ uint8_t getFingerprintEnroll()
   }
   Serial.print("ID "); Serial.println(id);
   p = -1;
-  Serial.println("Coloque o mesmo dedo novamente");
+  Serial.println("Place same finger again");
   while (p != FINGERPRINT_OK) {
     p = finger.getImage();
     switch (p) {
-      case FINGERPRINT_OK:
-        Serial.println("Imagem capturada");
-        break;
-      case FINGERPRINT_NOFINGER:
-        Serial.print(".");
-        break;
-      case FINGERPRINT_PACKETRECIEVEERR:
-        Serial.println("Erro de comunicação");
-        break;
-      case FINGERPRINT_IMAGEFAIL:
-        Serial.println("Erro na captura da imagem");
-        break;
-      default:
-        Serial.println("Erro desconhecido");
-        break;
+    case FINGERPRINT_OK:
+      Serial.println("Image taken");
+      break;
+    case FINGERPRINT_NOFINGER:
+      Serial.print(".");
+      break;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      break;
+    case FINGERPRINT_IMAGEFAIL:
+      Serial.println("Imaging error");
+      break;
+    default:
+      Serial.println("Unknown error");
+      break;
     }
   }
+
+  // OK success!
 
   p = finger.image2Tz(2);
   switch (p) {
     case FINGERPRINT_OK:
-      Serial.println("Imagem convertida");
+      Serial.println("Image converted");
       break;
     case FINGERPRINT_IMAGEMESS:
-      Serial.println("Imagem muito confusa");
+      Serial.println("Image too messy");
       return p;
     case FINGERPRINT_PACKETRECIEVEERR:
-      Serial.println("Erro de comunicação");
+      Serial.println("Communication error");
       return p;
     case FINGERPRINT_FEATUREFAIL:
-      Serial.println("Não foi possível encontrar características da impressão digital");
+      Serial.println("Could not find fingerprint features");
       return p;
     case FINGERPRINT_INVALIDIMAGE:
-      Serial.println("Não foi possível encontrar características da impressão digital");
+      Serial.println("Could not find fingerprint features");
       return p;
     default:
-      Serial.println("Erro desconhecido");
+      Serial.println("Unknown error");
       return p;
   }
 
-  Serial.print("Criando modelo para o ID #");  Serial.println(id);
+  // OK converted!
+  Serial.print("Creating model for #");  Serial.println(id);
+
   p = finger.createModel();
   if (p == FINGERPRINT_OK) {
-    Serial.println("Impressões digitais correspondem!");
+    Serial.println("Prints matched!");
   } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
-    Serial.println("Erro de comunicação");
+    Serial.println("Communication error");
     return p;
   } else if (p == FINGERPRINT_ENROLLMISMATCH) {
-    Serial.println("Impressões digitais não correspondem");
+    Serial.println("Fingerprints did not match");
     return p;
   } else {
-    Serial.println("Erro desconhecido");
+    Serial.println("Unknown error");
     return p;
   }
 
   Serial.print("ID "); Serial.println(id);
   p = finger.storeModel(id);
   if (p == FINGERPRINT_OK) {
-    Serial.println("Armazenado!");
-    createUser(id);
+    Serial.println("Stored!");
+    createUser(id); // Adiciona a impressão digital ao servidor
+    id++;
   } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
-    Serial.println("Erro de comunicação");
+    Serial.println("Communication error");
     return p;
   } else if (p == FINGERPRINT_BADLOCATION) {
-    Serial.println("Não foi possível armazenar nessa localização");
+    Serial.println("Could not store in that location");
     return p;
   } else if (p == FINGERPRINT_FLASHERR) {
-    Serial.println("Erro ao escrever na memória flash");
+    Serial.println("Error writing to flash");
     return p;
   } else {
-    Serial.println("Erro desconhecido");
+    Serial.println("Unknown error");
     return p;
   }
+
   return true;
 }

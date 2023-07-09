@@ -65,6 +65,7 @@ def create_user():
 
 @app.route('/unlock', methods=['POST'])
 def unlock_door():
+    print(request.json)
     # Cria um novo acesso no histórico
     user_id = request.json.get('user_id')
     user = db.session.get(User, user_id)
@@ -77,7 +78,6 @@ def unlock_door():
     db.session.commit()
     
     return jsonify({'message': 'Porta desbloqueada! Bem-vindo', 'user': user.to_dict()}), 200
-
 
 if __name__ == '__main__':
     with app.app_context():
