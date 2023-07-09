@@ -268,7 +268,7 @@ uint8_t getFingerprintEnroll() {
     }
   }
 
-  // OK success!
+  // OK success!s
 
   p = finger.image2Tz(2);
   switch (p) {
